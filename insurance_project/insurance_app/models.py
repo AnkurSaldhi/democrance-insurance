@@ -57,6 +57,8 @@ class Quote(models.Model):
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='NEW')
     premium = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     cover = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
+    buy_date = models.DateTimeField(null=True, blank=True)  # Date when the policy is bought i.e. status=LIVE
+    expiry = models.DateTimeField(null=True, blank=True)  # Expiry date of the policy, set when policy goes LIVE
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

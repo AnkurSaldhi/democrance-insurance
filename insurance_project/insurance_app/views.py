@@ -1,10 +1,11 @@
 from django.http import JsonResponse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from .serializers import CustomerSerializer
 from .models import Quote, Customer, Policy
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 @api_view(['POST'])
 def create_customer(request):
@@ -115,6 +116,11 @@ def pay_quote(request):
 
             # Update the status to LIVE
             quote.status = 'LIVE'
+            # Set the buy_date to now
+            quote.buy_date = timezone.now()
+
+            # Set the expiry date (for example, 1 year from now)
+            quote.expiry = quote.buy_date + timedelta(days=365)
             quote.save()  # This will trigger the creation of a new PolicyHistory record
 
             return Response({
@@ -129,3 +135,47 @@ def pay_quote(request):
     except Quote.DoesNotExist:
         return Response({'error': 'Quote not found.'}, status=status.HTTP_404_NOT_FOUND)
 
+
+@api_view(['GET'])
+def get_customer_policies(request):
+    customer_id = request.GET.get('customer_id')  # Get customer_id from query parameters
+
+    if customer_id is None:
+        return Response({'error': 'customer_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        # Retrieve the customer based on the provided customer_id
+        customer = Customer.objects.get(id=customer_id)
+
+        # Query all quotes associated with the customer
+        # Assuming frontend will filter them based on status, e.g. if the requirement is to show only with status="LIVE",
+        # then that filtering logic can be added on frontend
+        quotes = Quote.objects.filter(customer=customer)
+
+        # Prepare the response data
+        policy_list = []
+        for quote in quotes:
+            policy_list.append({
+                'quote_id': quote.id,
+                'policy_type': quote.policy.type,
+                'status': quote.status,
+                'created_at': quote.created_at,
+                'buy_date':quote.buy_date,
+                'expiry':quote.expiry
+            })
+
+        # Return customer info once with a list of associated policies
+        response_data = {
+            'customer_info': {
+                'id': customer.id,
+                'first_name': customer.first_name,
+                'last_name': customer.last_name,
+                'email': customer.email  # Include any other fields as needed
+            },
+            'policies': policy_list  # List of policies for the customer
+        }
+
+        return Response(response_data, status=status.HTTP_200_OK)
+
+    except Customer.DoesNotExist:
+        return Response({'error': 'Customer not found.'}, status=status.HTTP_404_NOT_FOUND)
