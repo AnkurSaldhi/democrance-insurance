@@ -23,8 +23,13 @@ class Policy(models.Model):
 
     name = models.CharField(max_length=255)
     type = models.CharField(max_length=50, choices=INSURANCE_TYPES, unique=True)
-    premium = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)  # Premium for the policy
-    cover = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)    # Coverage amount
+
+    # Default Premium for the policy, modified by age later in Create Quote
+    premium = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+
+    # Default Cover for the policy, modified by age later in Create Quote
+    cover = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -32,3 +37,53 @@ class Policy(models.Model):
         return self.name
 
 
+class PolicyHistory(models.Model):
+    quote = models.ForeignKey('Quote', on_delete=models.CASCADE, related_name='history')  # Allow multiple history records for each quote
+    last_status = models.CharField(max_length=10)  # Store the status of the quote
+    changed_at = models.DateTimeField(auto_now_add=True)  # Capture when the status was changed
+
+    def __str__(self):
+        return f"History for Quote ID {self.quote.id}: {self.last_status} at {self.changed_at}"
+
+class Quote(models.Model):
+    STATUS_CHOICES = [
+        ('NEW', 'New'),
+        ('QUOTED', 'Quoted'),
+        ('LIVE', 'Live'),
+    ]
+
+    customer = models.ForeignKey('Customer', on_delete=models.CASCADE)
+    policy = models.ForeignKey('Policy', on_delete=models.CASCADE)
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='NEW')
+    premium = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    cover = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Quote for {self.customer.first_name} - {self.policy.name} ({self.status})"
+
+    def save(self, *args, **kwargs):
+        is_new_quote = self.pk is None  # Check if this is a new quote
+
+        if not is_new_quote:
+            original = Quote.objects.get(pk=self.pk)  # Get the original quote before saving
+            original_status = original.status  # Store the original status
+
+        # Save the quote first to get the pk
+        super().save(*args, **kwargs)
+
+        # If this is a new quote, create the initial PolicyHistory record
+        if is_new_quote:
+            PolicyHistory.objects.create(
+                quote=self,
+                last_status=self.status  # Record the initial status
+            )
+        else:
+            # If this is an update, check if the status has changed
+            if original_status != self.status:
+                # Create a new history record for the status change
+                PolicyHistory.objects.create(
+                    quote=self,
+                    last_status=self.status  # Record the latest status
+                )
