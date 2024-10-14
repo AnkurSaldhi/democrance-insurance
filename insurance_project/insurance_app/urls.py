@@ -1,3 +1,5 @@
+from django.conf import settings
+from django.conf.urls.static import static
 from django.urls import path
 from .views import create_customer, create_quote, accept_quote, pay_quote, get_customer_policies,\
     get_policy_details, get_policy_history, search_customers
@@ -13,3 +15,6 @@ urlpatterns = [
     path('search_customers/', search_customers, name='search_customers'),  # New endpoint for searching customers
 
 ]
+
+if settings.DEBUG is False:
+    urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
