@@ -1,24 +1,23 @@
-from django.http import JsonResponse
 from django.utils import timezone
+from django.db.models import Q
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from .serializers import CustomerSerializer
-from .models import Quote, Customer, Policy
+from .models import Quote, Customer, Policy, PolicyHistory
+from .constants import POLICY_STATUS_NEW, POLICY_STATUS_QUOTED, POLICY_STATUS_LIVE, QUOTE_NOT_PAID_ERROR, \
+    STATUS_NOT_ACTIVE_ERROR, INVALID_CUSTOMER_OR_POLICY_ERROR, STATUS_NOT_ACCEPTED_ERROR, \
+    QUOTE_NOT_NEW_ERROR, CUSTOMER_ID_NOT_FOUND, CUSTOMER_NOT_FOUND, QUOTE_NOT_FOUND, \
+    INVALID_DOB_DATE_FORMAT
+from .utils import get_multiplier_for_age
 from datetime import datetime, date, timedelta
+
 
 @api_view(['POST'])
 def create_customer(request):
     if request.method == 'POST':
         serializer = CustomerSerializer(data=request.data)
         if serializer.is_valid():
-            birth_date = serializer.validated_data['dob']
-            today = datetime.now().date()
-
-            # Check if birth_date is in the future
-            if birth_date > today:
-                return JsonResponse({'error': 'Date of birth cannot be in the future.'},
-                                    status=status.HTTP_400_BAD_REQUEST)
             serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -37,18 +36,16 @@ def create_quote(request):
         # Calculate age to determine premium and cover adjustments
         today = date.today()
         age = today.year - customer.dob.year - (
-                    (today.month, today.day) < (customer.dob.month, customer.dob.day))
+                (today.month, today.day) < (customer.dob.month, customer.dob.day))
 
         # Calculate modified premium and cover based on age
-        if age < 18:
-            premium = policy.premium * 0.8  # 20% discount for underage
-            cover = policy.cover * 0.8  # 20% less cover
-        else:
-            premium = policy.premium
-            cover = policy.cover
+        age_multiplier = get_multiplier_for_age(age)
+
+        premium = round(float(policy.premium) * age_multiplier, 2)
+        cover = round(float(policy.cover) * age_multiplier, 2)
 
     except (Customer.DoesNotExist, Policy.DoesNotExist):
-        return Response({'error': 'Invalid customer or policy type.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'error': INVALID_CUSTOMER_OR_POLICY_ERROR}, status=status.HTTP_400_BAD_REQUEST)
 
     # Create the quote with the calculated premium and cover
     quote = Quote.objects.create(customer=customer, policy=policy, premium=premium, cover=cover)
@@ -70,16 +67,16 @@ def accept_quote(request):
 
     # Check if the status parameter is provided
     if status_param != 'accepted':
-        return Response({'error': 'Invalid status. Status must be "accepted".'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'error': STATUS_NOT_ACCEPTED_ERROR}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
         # Retrieve the quote based on the provided quote_id
         quote = Quote.objects.get(id=quote_id)
 
         # Check the current status
-        if quote.status == 'NEW':
+        if quote.status == POLICY_STATUS_NEW:
             # Update the status to QUOTED
-            quote.status = 'QUOTED'
+            quote.status = POLICY_STATUS_QUOTED
             quote.save()  # This will trigger the creation of a new PolicyHistory record
 
             return Response({
@@ -88,12 +85,11 @@ def accept_quote(request):
             }, status=status.HTTP_200_OK)
         else:
             return Response({
-                'error': 'Quote cannot be accepted as it is not in NEW status.'
+                'error': QUOTE_NOT_NEW_ERROR
             }, status=status.HTTP_400_BAD_REQUEST)
 
     except Quote.DoesNotExist:
-        return Response({'error': 'Quote not found.'}, status=status.HTTP_404_NOT_FOUND)
-
+        return Response({'error': QUOTE_NOT_FOUND}, status=status.HTTP_404_NOT_FOUND)
 
 
 @api_view(['POST'])
@@ -103,23 +99,24 @@ def pay_quote(request):
 
     # Check if the status parameter is provided
     if status_param != 'active':
-        return Response({'error': 'Invalid status. Status must be "active".'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'error': STATUS_NOT_ACTIVE_ERROR}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
         # Retrieve the quote based on the provided quote_id
         quote = Quote.objects.get(id=quote_id)
 
         # Check the current status
-        if quote.status == 'QUOTED':
+        if quote.status == POLICY_STATUS_QUOTED:
             # Simulate payment processing here
-            # payment_processing(quote)  # Uncomment this line when implementing actual payment logic
+            # payment_processing(quote)
 
             # Update the status to LIVE
-            quote.status = 'LIVE'
+            quote.status = POLICY_STATUS_LIVE
+
             # Set the buy_date to now
             quote.buy_date = timezone.now()
 
-            # Set the expiry date (for example, 1 year from now)
+            # Set the expiry date
             quote.expiry = quote.buy_date + timedelta(days=365)
             quote.save()  # This will trigger the creation of a new PolicyHistory record
 
@@ -129,19 +126,21 @@ def pay_quote(request):
             }, status=status.HTTP_200_OK)
         else:
             return Response({
-                'error': 'Quote cannot be paid as it is not in QUOTED status.'
+                'error': QUOTE_NOT_PAID_ERROR
             }, status=status.HTTP_400_BAD_REQUEST)
 
     except Quote.DoesNotExist:
-        return Response({'error': 'Quote not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({'error': QUOTE_NOT_FOUND}, status=status.HTTP_404_NOT_FOUND)
 
 
 @api_view(['GET'])
 def get_customer_policies(request):
+    # TODO: We can consider adding Pagination to this endpoint at a later stage
+
     customer_id = request.GET.get('customer_id')  # Get customer_id from query parameters
 
     if customer_id is None:
-        return Response({'error': 'customer_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'error': CUSTOMER_ID_NOT_FOUND}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
         # Retrieve the customer based on the provided customer_id
@@ -157,11 +156,10 @@ def get_customer_policies(request):
         for quote in quotes:
             policy_list.append({
                 'quote_id': quote.id,
+                'policy_name': quote.policy.name,
                 'policy_type': quote.policy.type,
                 'status': quote.status,
                 'created_at': quote.created_at,
-                'buy_date':quote.buy_date,
-                'expiry':quote.expiry
             })
 
         # Return customer info once with a list of associated policies
@@ -170,7 +168,8 @@ def get_customer_policies(request):
                 'id': customer.id,
                 'first_name': customer.first_name,
                 'last_name': customer.last_name,
-                'email': customer.email  # Include any other fields as needed
+                'email': customer.email,  # Include any other fields as needed
+                'dob': customer.dob
             },
             'policies': policy_list  # List of policies for the customer
         }
@@ -178,4 +177,109 @@ def get_customer_policies(request):
         return Response(response_data, status=status.HTTP_200_OK)
 
     except Customer.DoesNotExist:
-        return Response({'error': 'Customer not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({'error': CUSTOMER_NOT_FOUND}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['GET'])
+def get_policy_details(request, quote_id):
+    try:
+        # Retrieve the quote based on the provided quote_id
+        quote = Quote.objects.get(id=quote_id)
+
+        # Prepare the response data
+        policy_details = {
+            'quote_id': quote.id,
+            'policy_name': quote.policy.name,  # Assuming name is a field in Policy
+            'cover': quote.cover,
+            'premium': quote.premium,
+            'buy_date': quote.buy_date,
+            'expiry': quote.expiry,
+            'status': quote.status,
+        }
+
+        return Response(policy_details, status=status.HTTP_200_OK)
+
+    except Quote.DoesNotExist:
+        return Response({'error': QUOTE_NOT_FOUND}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['GET'])
+def get_policy_history(request, quote_id):
+    try:
+        # Retrieve the quote to ensure it exists
+        quote = Quote.objects.get(id=quote_id)
+
+        # Query all policy history records associated with the quote, ordered by changed_at
+        history_records = PolicyHistory.objects.filter(quote=quote).order_by('-changed_at')
+
+        # Prepare the response data
+        history_list = []
+        for record in history_records:
+            history_list.append({
+                'quote_id': record.quote.id,
+                'last_status': record.last_status,
+                'changed_at': record.changed_at
+            })
+
+        return Response(history_list, status=status.HTTP_200_OK)
+
+    except Quote.DoesNotExist:
+        return Response({'error': QUOTE_NOT_FOUND}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['GET'])
+def search_customers(request):
+    """
+    This will return customer records with customer_id
+    Frontend can further hit "List Policies" api to continue the flow i.e. list a particular customer's quotes/policies
+    """
+    # TODO: We can consider adding Pagination to this endpoint at a later stage
+
+    name = request.GET.get('name', None)
+    dob = request.GET.get('dob', None)  # Expecting a date in the format 'DD-MM-YYYY'
+    policy_type = request.GET.get('policy_type', None)
+
+    # Prepare the response data
+    response_data = {
+        'customers': []
+    }
+
+    # If name or dob is provided, search for customers
+    if name or dob:
+        customers = Customer.objects.all()
+
+        # Filter customers based on name
+        if name:
+            customers = customers.filter(
+                Q(first_name__icontains=name) | Q(last_name__icontains=name)
+            )
+
+        # Filter customers based on date of birth
+        if dob:
+            try:
+                # Parse the dob in DD-MM-YYYY format to create a date object
+                dob_parsed = datetime.strptime(dob, '%d-%m-%Y').date()
+                customers = customers.filter(dob=dob_parsed)
+            except ValueError:
+                return Response({'error': INVALID_DOB_DATE_FORMAT}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Use the CustomerSerializer to serialize the customer data
+        serializer = CustomerSerializer(customers, many=True)
+
+        # Add serialized customer info to the response
+        response_data['customers'] = serializer.data
+
+    # If policy_type is provided, we can still check for associated customers
+    if policy_type:
+        quotes = Quote.objects.filter(policy__type=policy_type)
+        customer_ids = quotes.values_list('customer_id', flat=True).distinct()
+
+        # Fetch customers based on the retrieved IDs
+        customers_with_policies = Customer.objects.filter(id__in=customer_ids)
+
+        # Serialize these customers as well
+        if customers_with_policies.exists():
+            serializer = CustomerSerializer(customers_with_policies, many=True)
+            response_data['customers'].extend(serializer.data)
+
+    return Response(response_data, status=status.HTTP_200_OK)
